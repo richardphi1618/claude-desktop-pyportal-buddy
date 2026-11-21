@@ -41,6 +41,8 @@ WEATHER_RETRY = 60
 WEATHER_CONFIG = Path(__file__).with_name("weather_config.json")
 MIN_HOLD = 5.0                # s a session keeps the screen before an equal one takes it
 DONE_HOLD = 10.0              # s a finished session is shown before it counts as seen
+IDLE_SHOWN = 60               # s the device keeps showing a done/waiting session (IDLE_TIMEOUT)
+WAIT_NTYPES = ("idle_prompt", "elicitation_dialog")
 LIVE_FOR = 600                # s without events before a session drops off the dots
 MAX_DOTS = 8
 PLAYING = 4                   # GlobalSystemMediaTransportControlsSessionPlaybackStatus.PLAYING
@@ -96,16 +98,22 @@ class Session:
         self.pending = ""
         self.cmd = ""
         self.unseen = False       # finished, but not yet shown on screen for DONE_HOLD
+        self.shown_done = None    # when its "All done" first reached the screen
 
-    def rank(self):
-        """How much this session wants the screen (higher wins)."""
+    def rank(self, now):
+        """How much this session wants the screen (higher wins).
+
+        Done/waiting only count while the device would still show them; after
+        that the device falls back to weather, so they must not outrank work.
+        """
         if self.mode == "permission":
             return 4
-        if self.mode == "done" and self.unseen:
+        fresh = now - self.last < IDLE_SHOWN
+        if self.mode == "done" and self.unseen and fresh:
             return 3
-        if self.mode == "waiting":
+        if self.mode == "waiting" and fresh:
             return 2
-        if self.mode in ("done", "bye"):
+        if self.mode in ("done", "bye", "waiting"):
             return 0
         return 1                  # hello, thinking, tools, compacting
 
@@ -168,14 +176,16 @@ class Model:
             s.mode = "thinking"
         elif name == "Notification":
             msg = ev.get("msg", "")
-            if ev.get("ntype") == "permission_prompt" or "permission" in msg.lower():
+            ntype = ev.get("ntype", "")
+            if ntype == "permission_prompt" or not ntype and "permission" in msg.lower():
                 s.mode = "permission"
                 s.detail = ("OK? " + s.pending) if s.pending else msg
-            else:
+            elif ntype in WAIT_NTYPES or not ntype:
                 s.mode, s.detail = "waiting", msg or "waiting for you"
+            # other types (agent_completed, auth_success, ...) don't need you
         elif name == "Stop":
             s.mode, s.detail = "done", "%d tools used" % s.tools
-            s.unseen = True
+            s.unseen, s.shown_done = True, None
         elif name == "PreCompact":
             s.mode, s.detail = "compact", "tidying up context"
         elif name == "SessionEnd":
@@ -201,19 +211,22 @@ class Model:
         for s in self.sessions.values():          # stale prompts stop being urgent
             if s.mode == "permission" and now - s.last > 1800:
                 s.mode = "waiting"
-        best = max(self.sessions, key=lambda k: (self.sessions[k].rank(), self.sessions[k].last))
+        best = max(self.sessions, key=lambda k: (self.sessions[k].rank(now), self.sessions[k].last))
         cur = self.sessions.get(self.focus)
         if cur is not None and best != self.focus:
             held = now - self.focus_since
-            if cur.rank() > self.sessions[best].rank():
+            if cur.rank(now) > self.sessions[best].rank(now):
                 best = self.focus                 # still the most important one
-            elif cur.rank() == self.sessions[best].rank() and held < MIN_HOLD:
+            elif cur.rank(now) == self.sessions[best].rank(now) and held < MIN_HOLD:
                 best = self.focus                 # equal: let it finish its turn
         if best != self.focus:
             self.focus, self.focus_since = best, now
         pick = self.sessions[best]
-        if pick.unseen and pick.mode == "done" and now - self.focus_since >= DONE_HOLD:
-            pick.unseen = False
+        if pick.unseen and pick.mode == "done":
+            if pick.shown_done is None:
+                pick.shown_done = now
+            elif now - pick.shown_done >= DONE_HOLD:
+                pick.unseen = False
         return pick
 
     def next_change(self):
@@ -221,14 +234,14 @@ class Model:
         cur = self.sessions.get(self.focus)
         if cur is None or len(self.sessions) < 2 and not cur.unseen:
             return None
-        if cur.unseen:
-            return self.focus_since + DONE_HOLD
+        if cur.unseen and cur.shown_done is not None:
+            return cur.shown_done + DONE_HOLD
         return self.focus_since + MIN_HOLD
 
     def _claude_snapshot(self, now):
         pick = self._choose(now)
         live = sorted((s for s in self.sessions.values()
-                       if not s.ended and (now - s.last < LIVE_FOR or s.rank() >= 2)
+                       if not s.ended and (now - s.last < LIVE_FOR or s.mode == "permission")
                        or s is pick),
                       key=lambda s: s.start)[:MAX_DOTS]
         snap = {

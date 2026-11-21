@@ -45,6 +45,7 @@ GIFs of every state are in [docs/animations](docs/animations/README.md).
 | Your turn | idle notification | `?` |
 | All done | Stop | happy face, sparkles |
 | Goodnight | session end | zzz |
+| Break time | 2+ sessions, all idle | mini buddies (one per session) chat around a water cooler; bubbles glug, a drip falls, one sips from a cup |
 | Listening | Spotify playing, Claude idle | headphones, swaying, floating notes, song + artist |
 
 ## Multiple sessions
@@ -53,6 +54,7 @@ The bridge tracks every Claude Code session and shows one at a time:
 - **Hold**: a session keeps the screen for at least 5 s before another session of equal priority can take over. A finished session shows "All done" for 10 s before it counts as seen.
 - **Dots**: with more than one live session, the header shows one dot per session (yellow = needs you, green = done, white = your turn, blue = working, grey = idle). The bigger dot is the session on screen.
 
+- **Water cooler**: when two or more sessions are all idle (and each one's "All done" has been shown), the screen shows them on a break at a water cooler. The weather takes over 60 s after the last activity, as with a single session.
 - **Tap to switch**: tap the screen to show the next session (in dot order). The choice lasts 30 s, every tap restarts the timer, and the footer counts down (`manual 0:25`). After that, automatic mode takes over again. During an override, a permission prompt in another session doesn't take the screen: it shows as a yellow dot, and the NeoPixel blinks yellow. Taps are ignored on the weather and Spotify screens, and when only one session is live.
 
 Tune `MIN_HOLD`, `DONE_HOLD`, `LIVE_FOR` and `OVERRIDE` in `host/pyportal_bridge.py`.

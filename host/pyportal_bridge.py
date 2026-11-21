@@ -45,6 +45,7 @@ IDLE_SHOWN = 60               # s the device keeps showing a done/waiting sessio
 WAIT_NTYPES = ("idle_prompt", "elicitation_dialog")
 LIVE_FOR = 600                # s without events before a session drops off the dots
 MAX_DOTS = 8
+IDLE_MODES = ("done", "waiting", "bye")
 OVERRIDE = 30.0               # s a tap on the screen overrides the automatic choice
 TAP_LINE = "@tap"             # what the PyPortal prints when the screen is tapped
 PLAYING = 4                   # GlobalSystemMediaTransportControlsSessionPlaybackStatus.PLAYING
@@ -260,6 +261,24 @@ class Model:
                 pick.unseen = False
         return pick
 
+    @staticmethod
+    def _cooler_snapshot(now, live):
+        """Every live session is idle: the minis gather at the water cooler."""
+        counts = {}
+        for s in live:
+            name = s.project or "Claude Code"
+            counts[name] = counts.get(name, 0) + 1
+        names = ", ".join(n if c == 1 else "%s x%d" % (n, c) for n, c in counts.items())
+        return {
+            "m": "cooler",
+            "d": ascii_only(names),
+            "p": "%d sessions idle" % len(live),
+            "age": int(min(now - s.last for s in live)),   # weather after the last one rests
+            "ss": len(live),
+            "sd": "".join(s.dot() for s in live),
+            "sf": -1,
+        }
+
     def next_change(self):
         """Time at which a hold runs out and the screen may need to switch."""
         if self.override_until:
@@ -274,6 +293,9 @@ class Model:
     def _claude_snapshot(self, now):
         pick = self._choose(now)
         live = self._live(now, pick)
+        if (not self.override_until and len(live) >= 2
+                and all(s.mode in IDLE_MODES and not s.unseen for s in live)):
+            return self._cooler_snapshot(now, live)
         snap = {
             "m": pick.mode,
             "d": ascii_only(pick.detail),

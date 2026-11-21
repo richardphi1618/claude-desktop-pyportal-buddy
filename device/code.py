@@ -16,6 +16,7 @@ import displayio
 import neopixel
 import rtc
 import supervisor
+import adafruit_touchscreen
 
 cwd = ("/" + __file__).rsplit('/', 1)[0]
 sys.path.append(cwd)
@@ -27,6 +28,8 @@ IDLE_TIMEOUT = 60         # s after Claude finishes before showing weather
 BUSY_TIMEOUT = 1800       # s a busy/permission state may stay up without news
 THINK_TIMEOUT = 300       # s "thinking" may stay up without news (e.g. after Esc)
 BRIDGE_TIMEOUT = 20       # s of serial silence => bridge gone => weather
+TOUCH_EVERY = 0.05        # s between touchscreen reads
+TAP_GAP = 0.3             # s after a tap before another one counts
 
 display = board.DISPLAY
 display.rotation = 0
@@ -38,6 +41,9 @@ root = displayio.Group()
 display.root_group = root
 gfx = WeatherView(am_pm=True)
 root.append(gfx)
+touch = adafruit_touchscreen.Touchscreen(
+    board.TOUCH_XL, board.TOUCH_XR, board.TOUCH_YD, board.TOUCH_YU,
+    calibration=((5200, 59000), (5800, 57000)), size=(320, 240))
 buddy = ClaudeBuddy()
 buddy.hidden = True
 root.append(buddy)
@@ -90,6 +96,8 @@ class SerialLines:
 def claude_wanted(snap, rx, now):
     if snap is None or now - rx > BRIDGE_TIMEOUT:
         return False
+    if now - rx < snap.get("ov", 0):      # a tap picked this session: keep it up
+        return True
     age = snap.get("age", 0) + (now - rx)
     mode = snap.get("m")
     if mode == "thinking":
@@ -118,6 +126,8 @@ serial_in = SerialLines()
 snap, snap_rx = None, 0.0
 showing_claude = False
 clock_drawn = -100.0
+touch_at = tap_at = 0.0
+touching = False
 
 gc_at = 0.0
 mem_report_at = 0.0
@@ -155,6 +165,13 @@ while True:
                 if now - mem_report_at > 300:
                     print("mem free:", gc.mem_free())
                     mem_report_at = now
+            if claude and now - touch_at >= TOUCH_EVERY:   # taps only on Claude screens
+                touch_at = now
+                pressed = touch.touch_point is not None
+                if pressed and not touching and now - tap_at >= TAP_GAP:
+                    tap_at = now
+                    print("@tap")                       # the bridge switches sessions
+                touching = pressed
             buddy.tick(now)
             pixel[0] = buddy.pixel_color(now)
             time.sleep(0.03)

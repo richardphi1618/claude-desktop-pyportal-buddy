@@ -307,6 +307,9 @@ SCENES = {
                            sd="bbp", sf=2, ss=3)),
                   (9, snap("done", "31 tools used", p="web-ui", age=1,
                            sd="bdb", sf=1, ss=3))], False),
+    "tap": ("Tapped to another session: manual for 30 s, yellow dot still waiting", 5,
+            [(0, snap("edit", "Edit routes.py", p="api-server", sd="bpb", sf=0, ss=3, ov=30))],
+            False),
     "music_working": ("Headphones on while Claude works", 7,
                       [(0, snap("bash", "Bash Run the tests", c="npm test", mu=SONG))], False),
 }

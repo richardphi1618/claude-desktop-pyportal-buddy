@@ -45,6 +45,8 @@ IDLE_SHOWN = 60               # s the device keeps showing a done/waiting sessio
 WAIT_NTYPES = ("idle_prompt", "elicitation_dialog")
 LIVE_FOR = 600                # s without events before a session drops off the dots
 MAX_DOTS = 8
+OVERRIDE = 30.0               # s a tap on the screen overrides the automatic choice
+TAP_LINE = "@tap"             # what the PyPortal prints when the screen is tapped
 PLAYING = 4                   # GlobalSystemMediaTransportControlsSessionPlaybackStatus.PLAYING
 
 READ_TOOLS = {"Read", "Grep", "Glob", "LS", "NotebookRead", "ListMcpResourcesTool",
@@ -87,7 +89,8 @@ def tool_label(tool, detail):
 
 
 class Session:
-    def __init__(self, now):
+    def __init__(self, sid, now):
+        self.sid = sid
         self.start = now
         self.last = now
         self.mode = "hello"
@@ -137,6 +140,7 @@ class Model:
         self.weather = None
         self.focus = None         # sid currently on screen
         self.focus_since = 0.0
+        self.override_until = 0.0  # while in the future, a tap chose the focus
 
     def apply(self, ev):
         if "_music" in ev:
@@ -155,7 +159,7 @@ class Model:
         sid = ev.get("sid") or "?"
         s = self.sessions.get(sid)
         if s is None or name == "SessionStart":
-            s = self.sessions[sid] = Session(now)
+            s = self.sessions[sid] = Session(sid, now)
         if name != "Stop":
             s.unseen = False
         s.last = now
@@ -206,11 +210,35 @@ class Model:
         snap["tm"] = list(time.localtime(now)[:6])
         return snap
 
+    def _live(self, now, pick=None):
+        """Sessions shown as dots (and cycled by taps), oldest first."""
+        return sorted((s for s in self.sessions.values()
+                       if not s.ended and (now - s.last < LIVE_FOR or s.mode == "permission")
+                       or s is pick),
+                      key=lambda s: s.start)[:MAX_DOTS]
+
+    def tap(self, now):
+        """The screen was tapped: show the next session for OVERRIDE seconds."""
+        cur = self.sessions.get(self.focus)
+        live = self._live(now, cur)
+        if len(live) < 2:
+            return False
+        i = live.index(cur) if cur in live else -1
+        nxt = live[(i + 1) % len(live)]
+        self.focus, self.focus_since = nxt.sid, now
+        self.override_until = now + OVERRIDE
+        return True
+
     def _choose(self, now):
         """Pick the session to show: highest rank, but hold the current one a while."""
         for s in self.sessions.values():          # stale prompts stop being urgent
             if s.mode == "permission" and now - s.last > 1800:
                 s.mode = "waiting"
+        if self.override_until:
+            if now < self.override_until and self.focus in self.sessions:
+                return self._mark_seen(self.sessions[self.focus], now)
+            self.override_until = 0.0             # back to automatic, with a fresh hold
+            self.focus_since = now
         best = max(self.sessions, key=lambda k: (self.sessions[k].rank(now), self.sessions[k].last))
         cur = self.sessions.get(self.focus)
         if cur is not None and best != self.focus:
@@ -221,7 +249,10 @@ class Model:
                 best = self.focus                 # equal: let it finish its turn
         if best != self.focus:
             self.focus, self.focus_since = best, now
-        pick = self.sessions[best]
+        return self._mark_seen(self.sessions[best], now)
+
+    @staticmethod
+    def _mark_seen(pick, now):
         if pick.unseen and pick.mode == "done":
             if pick.shown_done is None:
                 pick.shown_done = now
@@ -231,6 +262,8 @@ class Model:
 
     def next_change(self):
         """Time at which a hold runs out and the screen may need to switch."""
+        if self.override_until:
+            return self.override_until
         cur = self.sessions.get(self.focus)
         if cur is None or len(self.sessions) < 2 and not cur.unseen:
             return None
@@ -240,10 +273,7 @@ class Model:
 
     def _claude_snapshot(self, now):
         pick = self._choose(now)
-        live = sorted((s for s in self.sessions.values()
-                       if not s.ended and (now - s.last < LIVE_FOR or s.mode == "permission")
-                       or s is pick),
-                      key=lambda s: s.start)[:MAX_DOTS]
+        live = self._live(now, pick)
         snap = {
             "m": pick.mode,
             "d": ascii_only(pick.detail),
@@ -258,6 +288,8 @@ class Model:
         if len(live) > 1:
             snap["sd"] = "".join(s.dot() for s in live)
             snap["sf"] = live.index(pick) if pick in live else -1
+        if self.override_until > now:
+            snap["ov"] = int(self.override_until - now + 0.999)
         return snap
 
 
@@ -430,7 +462,11 @@ def main():
                 *lines, rx = rx.split(b"\n")
                 for ln in lines:
                     text = ANSI.sub("", ln.decode("utf-8", "replace")).strip()
-                    if text:
+                    if text.endswith(TAP_LINE):
+                        switched = model.tap(time.time())
+                        log("tap:", "switched" if switched else "ignored (one session)")
+                        dirty = dirty or switched
+                    elif text:
                         log("pyportal:", text)
                 rx = rx[-2000:]
         except (serial.SerialException, OSError) as e:

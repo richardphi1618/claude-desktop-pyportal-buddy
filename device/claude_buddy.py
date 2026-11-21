@@ -580,7 +580,7 @@ class ClaudeBuddy(displayio.Group):
 
     def pixel_color(self, now):
         """Color for the onboard NeoPixel."""
-        if self.mode == "permission":
+        if self.mode == "permission" or "p" in self.snap.get("sd", ""):
             return YELLOW if int(now * 4) % 2 else 0x000000
         if self.mode in BUSY_MODES:
             return MODES[self.mode][1]
@@ -773,6 +773,9 @@ class ClaudeBuddy(displayio.Group):
             if self.music_view:
                 s = {}
                 parts.append("Claude is resting")
+            if "ov" in s:
+                left = max(0, int(s["ov"] - lag))
+                parts.append("manual %d:%02d" % (left // 60, left % 60))
             if "n" in s:
                 parts.append("%d tools" % s["n"])
             if "el" in s:

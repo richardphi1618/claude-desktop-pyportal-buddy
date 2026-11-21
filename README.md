@@ -53,7 +53,9 @@ The bridge tracks every Claude Code session and shows one at a time:
 - **Hold**: a session keeps the screen for at least 5 s before another session of equal priority can take over. A finished session shows "All done" for 10 s before it counts as seen.
 - **Dots**: with more than one live session, the header shows one dot per session (yellow = needs you, green = done, white = your turn, blue = working, grey = idle). The bigger dot is the session on screen.
 
-Tune `MIN_HOLD`, `DONE_HOLD` and `LIVE_FOR` in `host/pyportal_bridge.py`.
+- **Tap to switch**: tap the screen to show the next session (in dot order). The choice lasts 30 s, every tap restarts the timer, and the footer counts down (`manual 0:25`). After that, automatic mode takes over again. During an override, a permission prompt in another session doesn't take the screen: it shows as a yellow dot, and the NeoPixel blinks yellow. Taps are ignored on the weather and Spotify screens, and when only one session is live.
+
+Tune `MIN_HOLD`, `DONE_HOLD`, `LIVE_FOR` and `OVERRIDE` in `host/pyportal_bridge.py`.
 
 <img src="docs/animations/sessions.gif" width="240">
 

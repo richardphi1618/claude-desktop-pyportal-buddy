@@ -7,16 +7,45 @@ and the local time and sends both over USB. While Spotify is playing, the buddy 
 Claude is idle, the screen shows the buddy listening, with the song and artist,
 instead of the weather.
 
+```mermaid
+flowchart LR
+    subgraph WSL["WSL"]
+        CC["Claude Code session(s)"]
+        HOOK["host/pyportal_hook.py"]
+        SPOOL[("~/.claude/pyportal/events.jsonl")]
+        CC -- "hook event JSON (stdin)" --> HOOK
+        HOOK -- "append one compact line" --> SPOOL
+        HOOK -. "starts if not running" .-> START["host/start_bridge.sh"]
+    end
+
+    subgraph WIN["Windows"]
+        BRIDGE["host/pyportal_bridge.py<br/>(python.exe + pyserial)<br/>Model: sessions, priority,<br/>hold, tap override"]
+        MEDIA["Windows now-playing<br/>(Spotify)"]
+        OWM["OpenWeather API<br/>+ PC local time"]
+        MEDIA -- "song / artist" --> BRIDGE
+        OWM -- "every 10 min" --> BRIDGE
+    end
+
+    subgraph DEV["PyPortal (CircuitPython)"]
+        CODE["device/code.py<br/>main loop"]
+        BUDDY["device/claude_buddy.py<br/>animations"]
+        WX["device/weather_view.py"]
+        HW["Touchscreen + NeoPixel"]
+        CODE --> BUDDY
+        CODE --> WX
+        CODE <--> HW
+    end
+
+    START -. "launches" .-> BRIDGE
+    SPOOL -- "tail -F" --> BRIDGE
+    BRIDGE -- "JSON state snapshots<br/>USB serial 115200" --> CODE
+    CODE -- "@tap + log prints" --> BRIDGE
 ```
-Claude Code hooks (WSL)          Windows                      PyPortal (COM3 / G:)
-host/pyportal_hook.py  ──append──► ~/.claude/pyportal/events.jsonl
-                                    │ tail -F
-                                    ▼
-                         host/pyportal_bridge.py (python.exe + pyserial)
-                                    │ JSON line state snapshots over USB serial
-                                    ▼
-                         device/code.py + device/claude_buddy.py
-```
+
+The hook only records events. The bridge decides which session to show and adds
+the weather, time and music. The PyPortal draws whatever snapshot it receives.
+A tap on the screen goes back to the bridge as `@tap`, and the bridge switches
+to the next session.
 
 ## Pieces
 - `device/`: CircuitPython code (`code.py`, `claude_buddy.py`, `weather_view.py`). It uses the fonts, icons and `weather_background.bmp` that are already on the device. Deploy with `./deploy.sh`, which finds the CIRCUITPY drive automatically.

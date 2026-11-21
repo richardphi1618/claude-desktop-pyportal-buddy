@@ -59,7 +59,7 @@ The bridge tracks every Claude Code session and shows one at a time:
 
 Tune `MIN_HOLD`, `DONE_HOLD`, `LIVE_FOR` and `OVERRIDE` in `host/pyportal_bridge.py`.
 
-<img src="docs/animations/sessions.gif" width="240">
+<img src="docs/animations/sessions.gif" width="240"> <img src="docs/animations/tap.gif" width="240"> <img src="docs/animations/cooler.gif" width="240">
 
 ## Restore the original weather-only app
 Copy `pyportal_backup_*/code.py` back onto the CIRCUITPY drive. That app uses Wi-Fi and `secrets.py` again.

@@ -9,6 +9,11 @@ adds the current Spotify track to the snapshot as "mu": {"t": title, "a": artist
 That part needs:  python.exe -m pip install winrt-Windows.Media.Control
                   winrt-Windows.Foundation winrt-Windows.Foundation.Collections
 
+Also fetches the current weather from OpenWeather (the PyPortal has no Wi-Fi in
+use) and adds it as "wx", plus the local time as "tm": [y, mo, d, h, mi, s] so
+the device can set its clock. The weather needs host/weather_config.json:
+    {"token": "<openweather api key>", "location": "Richmond,US", "units": "imperial"}
+
 Launched by start_bridge.sh as:  tail -F events.jsonl | python.exe -u this.py
 """
 import asyncio
@@ -18,6 +23,9 @@ import re
 import sys
 import threading
 import time
+import urllib.parse
+import urllib.request
+from pathlib import Path
 
 import serial
 from serial.tools import list_ports
@@ -28,6 +36,9 @@ RECONNECT = 3.0
 FORGET_AFTER = 4 * 3600
 MUSIC_POLL = 1.5
 MUSIC_APPS = ("spotify",)     # substrings of the player's app id (lower case)
+WEATHER_EVERY = 600
+WEATHER_RETRY = 60
+WEATHER_CONFIG = Path(__file__).with_name("weather_config.json")
 PLAYING = 4                   # GlobalSystemMediaTransportControlsSessionPlaybackStatus.PLAYING
 
 READ_TOOLS = {"Read", "Grep", "Glob", "LS", "NotebookRead", "ListMcpResourcesTool",
@@ -86,10 +97,14 @@ class Model:
     def __init__(self):
         self.sessions = {}
         self.music = None
+        self.weather = None
 
     def apply(self, ev):
         if "_music" in ev:
             self.music = ev["_music"]
+            return
+        if "_weather" in ev:
+            self.weather = ev["_weather"]
             return
         name = ev.get("ev", "")
         if name == "SubagentStop":
@@ -137,13 +152,14 @@ class Model:
         for sid in [k for k, v in self.sessions.items() if now - v.last > FORGET_AFTER]:
             del self.sessions[sid]
         if not self.sessions:
-            if self.music is None:
-                return None
-            snap = {"m": "bye", "age": 99999}     # no Claude, just music
+            snap = {"m": "bye", "age": 99999}     # no Claude: music/weather only
         else:
             snap = self._claude_snapshot(now)
         if self.music:
             snap["mu"] = self.music
+        if self.weather:
+            snap["wx"] = self.weather
+        snap["tm"] = list(time.localtime(now)[:6])
         return snap
 
     def _claude_snapshot(self, now):
@@ -214,6 +230,54 @@ def music_watcher(q):
         log("music: watcher stopped:", e)
 
 
+def load_weather_config():
+    try:
+        cfg = json.loads(WEATHER_CONFIG.read_text())
+    except FileNotFoundError:
+        return None
+    if not cfg.get("token"):
+        return None
+    cfg.setdefault("location", "Richmond,US")
+    cfg.setdefault("units", "imperial")
+    return cfg
+
+
+def fetch_weather(cfg):
+    query = urllib.parse.urlencode({"q": cfg["location"], "units": cfg["units"],
+                                    "appid": cfg["token"]})
+    url = "https://api.openweathermap.org/data/2.5/weather?" + query
+    with urllib.request.urlopen(url, timeout=15) as resp:
+        w = json.load(resp)
+    cond = w["weather"][0]
+    desc = cond.get("description", "")
+    return {
+        "i": cond.get("icon", ""),
+        "c": ascii_only("%s, %s" % (w.get("name", ""), w.get("sys", {}).get("country", "")))[:30],
+        "w": ascii_only(cond.get("main", ""))[:20],
+        "d": ascii_only(desc[:1].upper() + desc[1:])[:40],
+        "t": round(w["main"]["temp"]),
+        "u": {"imperial": "F", "metric": "C"}.get(cfg["units"], "K"),
+    }
+
+
+def weather_watcher(q):
+    cfg = load_weather_config()
+    if cfg is None:
+        log("weather: no token in", WEATHER_CONFIG, "- weather display disabled")
+        return
+    log("weather: watching", cfg["location"])
+    while True:
+        try:
+            wx = fetch_weather(cfg)
+            log("weather:", wx)
+            q.put({"_weather": wx})
+            delay = WEATHER_EVERY
+        except Exception as e:  # pylint: disable=broad-except
+            log("weather: fetch failed:", type(e).__name__, e)   # never log the URL (has the key)
+            delay = WEATHER_RETRY
+        time.sleep(delay)
+
+
 def stdin_reader(q):
     for line in sys.stdin:
         line = line.strip()
@@ -231,6 +295,7 @@ def main():
     q = queue.Queue()
     threading.Thread(target=stdin_reader, args=(q,), daemon=True).start()
     threading.Thread(target=music_watcher, args=(q,), daemon=True).start()
+    threading.Thread(target=weather_watcher, args=(q,), daemon=True).start()
     model = Model()
     ser = None
     next_try = 0.0

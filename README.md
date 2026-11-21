@@ -1,8 +1,9 @@
 # Claude Desktop Buddy (PyPortal)
 
 An animated buddy on an Adafruit PyPortal that shows what Claude Code is doing.
-When Claude has been idle for 1 minute, the screen falls back to the original
-OpenWeather display. While Spotify is playing, the buddy wears headphones. If
+When Claude has been idle for 1 minute, the screen falls back to a weather
+display. The PyPortal doesn't use Wi-Fi: the bridge on the PC fetches the weather
+and the local time and sends both over USB. While Spotify is playing, the buddy wears headphones. If
 Claude is idle, the screen shows the buddy listening, with the song and artist,
 instead of the weather.
 
@@ -18,9 +19,10 @@ host/pyportal_hook.py  ──append──► ~/.claude/pyportal/events.jsonl
 ```
 
 ## Pieces
-- `device/`: CircuitPython code. Deploy with `./deploy.sh`, which finds the CIRCUITPY drive automatically.
+- `device/`: CircuitPython code (`code.py`, `claude_buddy.py`, `weather_view.py`). It uses the fonts, icons and `weather_background.bmp` that are already on the device. Deploy with `./deploy.sh`, which finds the CIRCUITPY drive automatically.
 - `host/pyportal_hook.py`: registered for the SessionStart, UserPromptSubmit, Pre/PostToolUse, Notification, Stop, SubagentStop, PreCompact and SessionEnd hooks in `~/.claude/settings.json`. It also starts the bridge if it isn't running.
 - Spotify: the bridge reads Windows' now-playing info (the same info as the volume flyout), so Spotify has to be playing on this PC. It needs `python.exe -m pip install winrt-Windows.Media.Control winrt-Windows.Foundation winrt-Windows.Foundation.Collections`. Without those packages the bridge still runs, just without music. To watch other players, change `MUSIC_APPS` in `pyportal_bridge.py`.
+- Weather: the bridge fetches OpenWeather every 10 minutes. It needs `host/weather_config.json` (gitignored), containing `{"token": "<OpenWeather API key>", "location": "Richmond,US", "units": "imperial"}` (`units` can be `metric`). Without that file the bridge still runs, but the weather screen stays on "Waiting for weather". The bridge also sends the PC's local time, which sets the PyPortal's clock. Weather updates only arrive while the bridge is running, and a Claude Code hook starts the bridge.
 - `host/start_bridge.sh`: start the bridge. Use `--stop` to stop it, or `--fg` to run it in the foreground. Log: `~/.claude/pyportal/bridge.log` (includes everything the PyPortal prints).
 - `tools/render_gifs.py`: renders the animations to `docs/animations/` on your computer, no PyPortal needed. It runs the real `device/claude_buddy.py` and draws it with Pillow. Run `python3 -m venv .venv && .venv/bin/pip install pillow` once, then `.venv/bin/python tools/render_gifs.py` (add scene names to render just those). Re-run it after changing an animation.
 - `pyportal_backup_*/`: the original device contents. It includes `secrets.py` (Wi-Fi password and API key), so don't commit or share it.
@@ -46,7 +48,7 @@ GIFs of every state are in [docs/animations](docs/animations/README.md).
 | Listening | Spotify playing, Claude idle | headphones, swaying, floating notes, song + artist |
 
 ## Restore the original weather-only app
-Copy `pyportal_backup_*/code.py` back onto the CIRCUITPY drive.
+Copy `pyportal_backup_*/code.py` back onto the CIRCUITPY drive. That app uses Wi-Fi and `secrets.py` again.
 
 ## Undo the hooks
 Restore `~/.claude/settings.json.bak-pyportal`, or delete the `pyportal_hook.py` entries under `"hooks"`.

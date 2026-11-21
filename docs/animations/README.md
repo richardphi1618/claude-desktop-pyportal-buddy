@@ -12,4 +12,4 @@ Rendered from `device/claude_buddy.py` by `tools/render_gifs.py` (regenerate aft
 | **Needs you!: permission prompt**<br>![permission](permission.gif) | **Your turn: idle notification**<br>![waiting](waiting.gif) |
 | **All done: Stop**<br>![done](done.gif) | **Compacting: PreCompact**<br>![compact](compact.gif) |
 | **Goodnight: session end**<br>![bye](bye.gif) | **Listening: Spotify playing, Claude idle**<br>![music](music.gif) |
-| **Headphones on while Claude works**<br>![music_working](music_working.gif) |  |
+| **Three sessions: dots show each one, the big dot is on screen**<br>![sessions](sessions.gif) | **Headphones on while Claude works**<br>![music_working](music_working.gif) |

@@ -100,6 +100,14 @@ MODES = {
     "bye":        ("Goodnight",   0x78909C, "zzz",     "closed", "flat",  0.8, 1),
     "music":      ("Listening",   GREEN,    "notes",   "happy",  "smile", 5.0, 3),
 }
+# session dots in the header, one per live session (letters from the bridge's
+# "sd" string); the one on screen is bigger. They replace the single state dot.
+DOT_COLORS = {"p": YELLOW, "d": 0x66BB6A, "w": WHITE, "b": 0x4FC3F7, "i": DIM}
+MAX_DOTS = 8
+DOT_Y = 10
+DOT_GAP = 12
+DOT_RIGHT = 250           # x of the last dot (where the single state dot sits)
+
 BUSY_MODES = ("thinking", "read", "web", "edit", "bash", "agent", "plan",
               "tool", "compact")
 
@@ -196,6 +204,7 @@ class ClaudeBuddy(displayio.Group):
         self._cmd_key = None
         self._cmd_at = 0.0
         self._pen = (0, 0)        # how far the page has been written (line, x)
+        self._proj_chars = 38     # header room for the project name
 
         # ---- header ---------------------------------------------------
         self.project = _label("Claude Code", GREY, 1, (0.0, 0.5), (6, 10))
@@ -404,6 +413,12 @@ class ClaudeBuddy(displayio.Group):
         self.append(self.detail)
         self.footer = _label(" ", DIM, 1, (0.5, 0.5), (160, 230))
         self.append(self.footer)
+        self.dots = []
+        for _ in range(MAX_DOTS):
+            c = Circle(0, DOT_Y, 3, fill=DIM)
+            c.hidden = True
+            self.dots.append(c)
+            self.append(c)
 
         self._apply_mode("hello")
 
@@ -469,6 +484,7 @@ class ClaudeBuddy(displayio.Group):
         if key != self._cmd_key:          # a new command: start typing it
             self._cmd_key = key
             self._cmd_at = now
+        self._draw_dots(snap.get("sd", ""), snap.get("sf", -1))
         self.music = snap.get("mu") or None
         self.band.hidden = self.cups.hidden = self.music is None
         if not self.music_view and mode != self.mode:
@@ -476,12 +492,28 @@ class ClaudeBuddy(displayio.Group):
         self._last_footer = -1
         self._last_text = -1
 
+    def _draw_dots(self, states, focus):
+        """Row of dots, one per session, colored by state; the shown one is bigger."""
+        if self.music_view:
+            states = ""
+        n = min(len(states), MAX_DOTS)
+        x0 = DOT_RIGHT - (n - 1) * DOT_GAP
+        for i, c in enumerate(self.dots):
+            c.hidden = i >= n
+            if i < n:
+                c.x = x0 + i * DOT_GAP
+                c.radius = 5 if i == focus else 3
+                c.pixel_shader = pal(DOT_COLORS.get(states[i], DIM))
+        self.dot.hidden = n > 0
+        self._proj_chars = (x0 - 18) // 6 if n else 38
+
     def set_music_view(self, on):
         """on: Claude is idle but music plays, so show the listening screen."""
         on = bool(on and self.music)
         if on == self.music_view:
             return
         self.music_view = on
+        self._draw_dots(self.snap.get("sd", ""), self.snap.get("sf", -1))
         self._apply_mode("music" if on else self.claude_mode)
         self._last_footer = -1
         self._last_text = -1
@@ -503,10 +535,10 @@ class ClaudeBuddy(displayio.Group):
             song = mu.get("t", "")
             if mu.get("a"):
                 song += " - " + mu["a"]
-            _set_text(self.project, "~ " + _marquee(song, 36, now))
+            _set_text(self.project, "~ " + _marquee(song, self._proj_chars - 2, now))
             self.project.color = GREEN
         else:
-            _set_text(self.project, _fit(s.get("p", "") or "Claude Code", 38))
+            _set_text(self.project, _fit(s.get("p", "") or "Claude Code", self._proj_chars))
             self.project.color = GREY
 
     # ---- page helpers ----------------------------------------------------
@@ -745,8 +777,6 @@ class ClaudeBuddy(displayio.Group):
                 parts.append("%d tools" % s["n"])
             if "el" in s:
                 parts.append(_fmt_elapsed(s["el"] + lag))
-            if s.get("ss", 1) > 1:
-                parts.append("%d sessions" % s["ss"])
             if mode in ("done", "waiting", "bye") and "age" in s:
                 parts.append("idle " + _fmt_elapsed(s["age"] + lag))
             _set_text(self.footer, "  |  ".join(parts) or " ")

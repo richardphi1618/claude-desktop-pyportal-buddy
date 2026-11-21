@@ -47,6 +47,16 @@ GIFs of every state are in [docs/animations](docs/animations/README.md).
 | Goodnight | session end | zzz |
 | Listening | Spotify playing, Claude idle | headphones, swaying, floating notes, song + artist |
 
+## Multiple sessions
+The bridge tracks every Claude Code session and shows one at a time:
+- **Priority**: needs approval > finished but not yet shown > waiting for your reply > working > idle. A higher-priority session takes the screen straight away.
+- **Hold**: a session keeps the screen for at least 5 s before another session of equal priority can take over. A finished session shows "All done" for 10 s before it counts as seen.
+- **Dots**: with more than one live session, the header shows one dot per session (yellow = needs you, green = done, white = your turn, blue = working, grey = idle). The bigger dot is the session on screen.
+
+Tune `MIN_HOLD`, `DONE_HOLD` and `LIVE_FOR` in `host/pyportal_bridge.py`.
+
+<img src="docs/animations/sessions.gif" width="240">
+
 ## Restore the original weather-only app
 Copy `pyportal_backup_*/code.py` back onto the CIRCUITPY drive. That app uses Wi-Fi and `secrets.py` again.
 

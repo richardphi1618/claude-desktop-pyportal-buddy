@@ -39,6 +39,10 @@ MUSIC_APPS = ("spotify",)     # substrings of the player's app id (lower case)
 WEATHER_EVERY = 600
 WEATHER_RETRY = 60
 WEATHER_CONFIG = Path(__file__).with_name("weather_config.json")
+MIN_HOLD = 5.0                # s a session keeps the screen before an equal one takes it
+DONE_HOLD = 10.0              # s a finished session is shown before it counts as seen
+LIVE_FOR = 600                # s without events before a session drops off the dots
+MAX_DOTS = 8
 PLAYING = 4                   # GlobalSystemMediaTransportControlsSessionPlaybackStatus.PLAYING
 
 READ_TOOLS = {"Read", "Grep", "Glob", "LS", "NotebookRead", "ListMcpResourcesTool",
@@ -91,6 +95,31 @@ class Session:
         self.ended = False
         self.pending = ""
         self.cmd = ""
+        self.unseen = False       # finished, but not yet shown on screen for DONE_HOLD
+
+    def rank(self):
+        """How much this session wants the screen (higher wins)."""
+        if self.mode == "permission":
+            return 4
+        if self.mode == "done" and self.unseen:
+            return 3
+        if self.mode == "waiting":
+            return 2
+        if self.mode in ("done", "bye"):
+            return 0
+        return 1                  # hello, thinking, tools, compacting
+
+    def dot(self):
+        """One-letter state for the session dots on the device."""
+        if self.mode == "permission":
+            return "p"
+        if self.mode == "done":
+            return "d" if self.unseen else "i"
+        if self.mode == "waiting":
+            return "w"
+        if self.mode == "bye":
+            return "i"
+        return "b"
 
 
 class Model:
@@ -98,6 +127,8 @@ class Model:
         self.sessions = {}
         self.music = None
         self.weather = None
+        self.focus = None         # sid currently on screen
+        self.focus_since = 0.0
 
     def apply(self, ev):
         if "_music" in ev:
@@ -117,6 +148,8 @@ class Model:
         s = self.sessions.get(sid)
         if s is None or name == "SessionStart":
             s = self.sessions[sid] = Session(now)
+        if name != "Stop":
+            s.unseen = False
         s.last = now
         s.ended = False
         s.project = ev.get("proj") or s.project
@@ -142,6 +175,7 @@ class Model:
                 s.mode, s.detail = "waiting", msg or "waiting for you"
         elif name == "Stop":
             s.mode, s.detail = "done", "%d tools used" % s.tools
+            s.unseen = True
         elif name == "PreCompact":
             s.mode, s.detail = "compact", "tidying up context"
         elif name == "SessionEnd":
@@ -162,11 +196,41 @@ class Model:
         snap["tm"] = list(time.localtime(now)[:6])
         return snap
 
+    def _choose(self, now):
+        """Pick the session to show: highest rank, but hold the current one a while."""
+        for s in self.sessions.values():          # stale prompts stop being urgent
+            if s.mode == "permission" and now - s.last > 1800:
+                s.mode = "waiting"
+        best = max(self.sessions, key=lambda k: (self.sessions[k].rank(), self.sessions[k].last))
+        cur = self.sessions.get(self.focus)
+        if cur is not None and best != self.focus:
+            held = now - self.focus_since
+            if cur.rank() > self.sessions[best].rank():
+                best = self.focus                 # still the most important one
+            elif cur.rank() == self.sessions[best].rank() and held < MIN_HOLD:
+                best = self.focus                 # equal: let it finish its turn
+        if best != self.focus:
+            self.focus, self.focus_since = best, now
+        pick = self.sessions[best]
+        if pick.unseen and pick.mode == "done" and now - self.focus_since >= DONE_HOLD:
+            pick.unseen = False
+        return pick
+
+    def next_change(self):
+        """Time at which a hold runs out and the screen may need to switch."""
+        cur = self.sessions.get(self.focus)
+        if cur is None or len(self.sessions) < 2 and not cur.unseen:
+            return None
+        if cur.unseen:
+            return self.focus_since + DONE_HOLD
+        return self.focus_since + MIN_HOLD
+
     def _claude_snapshot(self, now):
-        live = [s for s in self.sessions.values() if not s.ended and now - s.last < 600]
-        urgent = [s for s in self.sessions.values()
-                  if s.mode == "permission" and now - s.last < 1800]
-        pick = max(urgent or self.sessions.values(), key=lambda s: s.last)
+        pick = self._choose(now)
+        live = sorted((s for s in self.sessions.values()
+                       if not s.ended and (now - s.last < LIVE_FOR or s.rank() >= 2)
+                       or s is pick),
+                      key=lambda s: s.start)[:MAX_DOTS]
         snap = {
             "m": pick.mode,
             "d": ascii_only(pick.detail),
@@ -178,6 +242,9 @@ class Model:
         }
         if pick.mode == "bash" and pick.cmd:
             snap["c"] = ascii_only(pick.cmd)[:60]
+        if len(live) > 1:
+            snap["sd"] = "".join(s.dot() for s in live)
+            snap["sf"] = live.index(pick) if pick in live else -1
         return snap
 
 
@@ -332,6 +399,9 @@ def main():
         if ser is None:
             continue
         try:
+            due = model.next_change()
+            if due is not None and last_sent < due <= now:
+                dirty = True
             if dirty or now - last_sent >= HEARTBEAT:
                 snap = model.snapshot()
                 if snap is not None:

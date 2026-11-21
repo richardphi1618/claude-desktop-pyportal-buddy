@@ -1,8 +1,10 @@
-# Claude Code buddy + OpenWeather display for the Adafruit PyPortal.
+# Claude Code buddy + weather display for the Adafruit PyPortal.
 #
 # Shows an animated Claude buddy while Claude Code is active (state arrives as
 # JSON lines over USB serial from host/pyportal_bridge.py), and falls back to
-# the original OpenWeather screen when Claude has been idle for a while.
+# a weather screen when Claude has been idle for a while.
+# No Wi-Fi: the bridge fetches the weather and sends it, plus the local time,
+# over the same USB serial link.
 # While Spotify plays, the buddy wears headphones; if Claude is idle it shows a
 # "listening" screen with the song and artist instead of the weather.
 import gc
@@ -12,45 +14,36 @@ import time
 import board
 import displayio
 import neopixel
+import rtc
 import supervisor
-from adafruit_pyportal import PyPortal
+import adafruit_touchscreen
 
 cwd = ("/" + __file__).rsplit('/', 1)[0]
 sys.path.append(cwd)
-import openweather_graphics  # pylint: disable=wrong-import-position
+from weather_view import WeatherView  # pylint: disable=wrong-import-position
 from claude_buddy import ClaudeBuddy, BUSY_MODES  # pylint: disable=wrong-import-position
 
-try:
-    from secrets import secrets
-except ImportError:
-    print("WiFi secrets are kept in secrets.py, please add them there!")
-    raise
-
 # ---- settings ---------------------------------------------------------
-LOCATION = "Richmond, US"
-IDLE_TIMEOUT = 60         # s after Claude finishes before showing weather
+IDLE_TIMEOUT = 180        # s after Claude finishes before showing weather (keep IDLE_SHOWN in the bridge equal)
 BUSY_TIMEOUT = 1800       # s a busy/permission state may stay up without news
 THINK_TIMEOUT = 300       # s "thinking" may stay up without news (e.g. after Esc)
 BRIDGE_TIMEOUT = 20       # s of serial silence => bridge gone => weather
-WEATHER_EVERY = 600
-CLOCK_SYNC_EVERY = 3600
-RETRY_AFTER = 60
-
-DATA_SOURCE = "http://api.openweathermap.org/data/2.5/weather?q=" + LOCATION
-DATA_SOURCE += "&appid=" + secrets['openweather_token']
+TOUCH_EVERY = 0.05        # s between touchscreen reads
+TAP_GAP = 0.3             # s after a tap before another one counts
 
 display = board.DISPLAY
 display.rotation = 0
 
-pyportal = PyPortal(url=DATA_SOURCE, json_path=[], default_bg=0x000000)
 pixel = neopixel.NeoPixel(board.NEOPIXEL, 1, brightness=0.15)
 pixel[0] = 0
 
 root = displayio.Group()
 display.root_group = root
-root.append(pyportal.splash)
-
-gfx = openweather_graphics.OpenWeather_Graphics(pyportal.splash, am_pm=True, celsius=False)
+gfx = WeatherView(am_pm=True)
+root.append(gfx)
+touch = adafruit_touchscreen.Touchscreen(
+    board.TOUCH_XL, board.TOUCH_XR, board.TOUCH_YD, board.TOUCH_YU,
+    calibration=((5200, 59000), (5800, 57000)), size=(320, 240))
 buddy = ClaudeBuddy()
 buddy.hidden = True
 root.append(buddy)
@@ -103,6 +96,8 @@ class SerialLines:
 def claude_wanted(snap, rx, now):
     if snap is None or now - rx > BRIDGE_TIMEOUT:
         return False
+    if now - rx < snap.get("ov", 0):      # a tap picked this session: keep it up
+        return True
     age = snap.get("age", 0) + (now - rx)
     mode = snap.get("m")
     if mode == "thinking":
@@ -114,6 +109,15 @@ def claude_wanted(snap, rx, now):
     return age < IDLE_TIMEOUT
 
 
+def sync_clock(tm):
+    """Set the RTC from the bridge's [y, mo, d, h, mi, s] local time if it drifted."""
+    t = time.struct_time((tm[0], tm[1], tm[2], tm[3], tm[4], tm[5], 0, -1, -1))
+    if abs(time.mktime(t) - time.time()) > 2:
+        rtc.RTC().datetime = t
+        return True
+    return False
+
+
 def music_playing(snap, rx, now):
     return bool(snap and snap.get("mu") and now - rx <= BRIDGE_TIMEOUT)
 
@@ -121,9 +125,9 @@ def music_playing(snap, rx, now):
 serial_in = SerialLines()
 snap, snap_rx = None, 0.0
 showing_claude = False
-weather_at = clock_at = None
-weather_retry = clock_retry = 0.0
 clock_drawn = -100.0
+touch_at = tap_at = 0.0
+touching = False
 
 gc_at = 0.0
 mem_report_at = 0.0
@@ -136,6 +140,10 @@ while True:
         if s is not None:
             snap, snap_rx = s, now
             buddy.update(s, now)
+            if "wx" in s:
+                gfx.show(s["wx"])
+            if "tm" in s and sync_clock(s["tm"]):
+                clock_drawn = -100.0
 
         claude = claude_wanted(snap, snap_rx, now)
         music = music_playing(snap, snap_rx, now)
@@ -145,7 +153,7 @@ while True:
             showing_claude = want
             print("screen:", "buddy" if want else "weather")
             buddy.hidden = not want
-            pyportal.splash.hidden = want
+            gfx.hidden = want
             if not want:
                 pixel[0] = 0
                 clock_drawn = -100.0
@@ -157,29 +165,19 @@ while True:
                 if now - mem_report_at > 300:
                     print("mem free:", gc.mem_free())
                     mem_report_at = now
+            if claude and now - touch_at >= TOUCH_EVERY:   # taps only on Claude screens
+                touch_at = now
+                pressed = touch.touch_point is not None
+                if pressed and not touching and now - tap_at >= TAP_GAP:
+                    tap_at = now
+                    print("@tap")                       # the bridge switches sessions
+                touching = pressed
             buddy.tick(now)
             pixel[0] = buddy.pixel_color(now)
             time.sleep(0.03)
             continue
 
-        # ---- weather mode (network calls block, so only do them here) -----
-        if (clock_at is None or now - clock_at > CLOCK_SYNC_EVERY) and now >= clock_retry:
-            try:
-                print("Getting time from internet!")
-                pyportal.get_local_time()
-                clock_at = now
-            except Exception as e:  # pylint: disable=broad-except
-                print("time sync failed:", e)
-                clock_retry = now + RETRY_AFTER
-        if (weather_at is None or now - weather_at > WEATHER_EVERY) and now >= weather_retry:
-            try:
-                value = pyportal.fetch()
-                gfx.display_weather(value)
-                weather_at = now
-            except Exception as e:  # pylint: disable=broad-except
-                print("weather fetch failed:", e)
-                weather_retry = now + RETRY_AFTER
-            gc.collect()
+        # ---- weather mode: data and time arrive with the bridge snapshots ----
         if now - clock_drawn >= 30:
             gfx.update_time()
             clock_drawn = now

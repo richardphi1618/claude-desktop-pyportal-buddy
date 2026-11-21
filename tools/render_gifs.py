@@ -301,6 +301,20 @@ SCENES = {
               [(0, snap("bye", age=99999, mu=SONG))], True),
     "music_working": ("Headphones on while Claude works", 7,
                       [(0, snap("bash", "Bash Run the tests", c="npm test", mu=SONG))], False),
+    "sessions": ("Three sessions: dots show each one, the big dot is on screen", 12,
+                 [(0, snap("read", "Read routes.py", p="api-server", sd="bb", sf=0, ss=2)),
+                  (3, snap("bash", "Bash Run the tests", c="npm test", p="web-ui",
+                           sd="bb", sf=1, ss=2)),
+                  (6, snap("permission", "OK? Bash git push", p="infrastructure-terraform-modules",
+                           sd="bbp", sf=2, ss=3)),
+                  (9, snap("done", "31 tools used", p="web-ui", age=1,
+                           sd="bdb", sf=1, ss=3))], False),
+    "tap": ("Tapped to another session: manual for 30 s, yellow dot still waiting", 5,
+            [(0, snap("edit", "Edit routes.py", p="api-server", sd="bpb", sf=0, ss=3, ov=30))],
+            False),
+    "cooler": ("Water cooler: every session is idle", 10,
+               [(0, {"m": "cooler", "d": "api-server, web-ui, infra", "p": "3 sessions idle",
+                     "age": 12, "ss": 3, "sd": "iiw", "sf": -1})], False),
 }
 
 
@@ -328,18 +342,33 @@ def render(name, buddy_cls):
     print("%-14s %3d frames  %4d KB  %s" % (name, n, os.path.getsize(path) // 1024, title))
 
 
-def write_index():
-    lines = ["# Buddy animations", "",
-             "Rendered from `device/claude_buddy.py` by `tools/render_gifs.py` "
-             "(regenerate after changing animations). The font is an approximation "
-             "of the PyPortal's built-in one.", "",
-             "| | |", "|---|---|"]
-    names = list(SCENES)
+MULTI = ("sessions", "tap", "cooler")      # listed under "Multiple sessions"
+
+
+def _table(names):
+    lines = ["| | |", "|---|---|"]
     for a, b in zip(names[0::2], names[1::2] + [None]):
         row = []
         for n in (a, b):
             row.append("**%s**<br>![%s](%s.gif)" % (SCENES[n][0], n, n) if n else "")
         lines.append("| " + " | ".join(row) + " |")
+    return lines
+
+
+def write_index():
+    single = [n for n in SCENES if n not in MULTI]
+    multi = [n for n in SCENES if n in MULTI]
+    lines = ["# Buddy animations", "",
+             "Rendered from `device/claude_buddy.py` by `tools/render_gifs.py` "
+             "(regenerate after changing animations). The font is an approximation "
+             "of the PyPortal's built-in one.", "",
+             "## One session", ""] + _table(single) + [
+             "", "## Multiple sessions", "",
+             "With two or more live sessions, the header shows one dot per session "
+             "(yellow = needs you, green = done, white = your turn, blue = working, "
+             "grey = idle); the bigger dot is the session on screen. Tap the screen to "
+             "show the next session for 30 s. When every session is idle, they take a "
+             "break at the water cooler.", ""] + _table(multi)
     with open(os.path.join(OUT, "README.md"), "w") as f:
         f.write("\n".join(lines) + "\n")
 

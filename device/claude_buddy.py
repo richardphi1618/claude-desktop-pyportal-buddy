@@ -99,9 +99,27 @@ MODES = {
     "compact":    ("Compacting",  0x9575CD, "spinner", "closed", "flat",  0.0, 0),
     "bye":        ("Goodnight",   0x78909C, "zzz",     "closed", "flat",  0.8, 1),
     "music":      ("Listening",   GREEN,    "notes",   "happy",  "smile", 5.0, 3),
+    "cooler":     ("Break time",  0x4FC3F7, "cooler",  "open",   "flat",  0.0, 0),
 }
+# session dots in the header, one per live session (letters from the bridge's
+# "sd" string); the one on screen is bigger. They replace the single state dot.
+DOT_COLORS = {"p": YELLOW, "d": 0x66BB6A, "w": WHITE, "b": 0x4FC3F7, "i": DIM}
+MAX_DOTS = 8
+DOT_Y = 10
+DOT_GAP = 12
+DOT_RIGHT = 250           # x of the last dot (where the single state dot sits)
+
 BUSY_MODES = ("thinking", "read", "web", "edit", "bash", "agent", "plan",
               "tool", "compact")
+
+# water cooler: all sessions idle; one mini buddy per session gathers round
+WATER = 0x4FC3F7
+COOLER_GREY = 0xB0BEC5
+MINI_SLOTS = {2: (98, 192), 3: (58, 98, 192), 4: (58, 98, 192, 232)}
+MINI_Y = 108
+CHAT = ("lgtm", "ship it", "brb", "nice!", "coffee?", "tests ok", "merged",
+        "haha", "same", "lunch?", "rebase?", "it works")
+CHAT_EVERY = 2.4          # s per speech bubble (shown for most of it)
 
 BX, BY = 110, 50          # buddy body origin (top-left)
 SPIN = "|/-\\"
@@ -196,6 +214,7 @@ class ClaudeBuddy(displayio.Group):
         self._cmd_key = None
         self._cmd_at = 0.0
         self._pen = (0, 0)        # how far the page has been written (line, x)
+        self._proj_chars = 38     # header room for the project name
 
         # ---- header ---------------------------------------------------
         self.project = _label("Claude Code", GREY, 1, (0.0, 0.5), (6, 10))
@@ -391,6 +410,46 @@ class ClaudeBuddy(displayio.Group):
             g.append(n)
         self.props["notes"] = g
 
+        # water cooler: all sessions idle
+        g = displayio.Group()
+        g.append(Rect(40, 138, 240, 2, fill=0x2A2F36))               # floor
+        g.append(Rect(142, 72, 36, 66, fill=COOLER_GREY))            # cabinet
+        g.append(Rect(150, 96, 20, 22, fill=0x37474F))               # tap recess
+        g.append(Rect(157, 92, 6, 6, fill=0x546E7A))                 # tap
+        g.append(Rect(146, 124, 28, 3, fill=0x90A4AE))               # panel line
+        g.append(Rect(153, 66, 14, 6, fill=0x0288D1))                # jug neck
+        g.append(RoundRect(144, 30, 32, 38, 9, fill=WATER))          # jug
+        g.append(Rect(149, 36, 3, 24, fill=0xB3E5FC))                # jug shine
+        self.cooler_bubbles = []
+        for i in range(3):
+            c = Circle(156 + i * 5, 60, 2, fill=0xE1F5FE)
+            self.cooler_bubbles.append(c)
+            g.append(c)
+        self.drip = Circle(160, 100, 2, fill=WATER)
+        g.append(self.drip)
+        self.cooler_minis = []
+        for _ in range(4):
+            m = displayio.Group(y=MINI_Y)
+            m.append(Rect(5, 22, 6, 7, fill=ORANGE_DK))
+            m.append(Rect(19, 22, 6, 7, fill=ORANGE_DK))
+            m.append(RoundRect(0, 0, 30, 24, 7, fill=ORANGE))
+            eyes = displayio.Group()
+            eyes.append(Rect(8, 7, 3, 7, fill=INK))
+            eyes.append(Rect(19, 7, 3, 7, fill=INK))
+            m.append(eyes)
+            self.cooler_minis.append((m, eyes))
+            g.append(m)
+        self.cup = Rect(0, 0, 6, 8, fill=WHITE)                      # one mini sips
+        g.append(self.cup)
+        self.chat = displayio.Group()
+        self.chat.append(RoundRect(0, 0, 56, 16, 6, fill=WHITE))
+        self.chat.append(Triangle(22, 15, 30, 15, 26, 21, fill=WHITE))
+        self.chat_text = _label(" ", INK, 1, (0.5, 0.5), (28, 8))
+        self.chat.append(self.chat_text)
+        g.append(self.chat)
+        self.props["cooler"] = g
+        self._cooler_n = 0
+
         self.props["wave"] = displayio.Group()   # animation only, no prop
         for p in self.props.values():
             p.hidden = True
@@ -404,6 +463,12 @@ class ClaudeBuddy(displayio.Group):
         self.append(self.detail)
         self.footer = _label(" ", DIM, 1, (0.5, 0.5), (160, 230))
         self.append(self.footer)
+        self.dots = []
+        for _ in range(MAX_DOTS):
+            c = Circle(0, DOT_Y, 3, fill=DIM)
+            c.hidden = True
+            self.dots.append(c)
+            self.append(c)
 
         self._apply_mode("hello")
 
@@ -427,6 +492,7 @@ class ClaudeBuddy(displayio.Group):
         self.arm_r.hidden = mode in ("bash", "edit", "plan", "thinking")  # pencil / chin
         self.chin_hand.hidden = mode != "thinking"
         self.buddy.x = BX
+        self.buddy.hidden = mode == "cooler"     # the minis take over
         self.body.pixel_shader = pal(ORANGE)
         self.verb.color = color
         self.dot.pixel_shader = pal(color)
@@ -469,6 +535,7 @@ class ClaudeBuddy(displayio.Group):
         if key != self._cmd_key:          # a new command: start typing it
             self._cmd_key = key
             self._cmd_at = now
+        self._draw_dots(snap.get("sd", ""), snap.get("sf", -1))
         self.music = snap.get("mu") or None
         self.band.hidden = self.cups.hidden = self.music is None
         if not self.music_view and mode != self.mode:
@@ -476,12 +543,28 @@ class ClaudeBuddy(displayio.Group):
         self._last_footer = -1
         self._last_text = -1
 
+    def _draw_dots(self, states, focus):
+        """Row of dots, one per session, colored by state; the shown one is bigger."""
+        if self.music_view:
+            states = ""
+        n = min(len(states), MAX_DOTS)
+        x0 = DOT_RIGHT - (n - 1) * DOT_GAP
+        for i, c in enumerate(self.dots):
+            c.hidden = i >= n
+            if i < n:
+                c.x = x0 + i * DOT_GAP
+                c.radius = 5 if i == focus else 3
+                c.pixel_shader = pal(DOT_COLORS.get(states[i], DIM))
+        self.dot.hidden = n > 0
+        self._proj_chars = (x0 - 18) // 6 if n else 38
+
     def set_music_view(self, on):
         """on: Claude is idle but music plays, so show the listening screen."""
         on = bool(on and self.music)
         if on == self.music_view:
             return
         self.music_view = on
+        self._draw_dots(self.snap.get("sd", ""), self.snap.get("sf", -1))
         self._apply_mode("music" if on else self.claude_mode)
         self._last_footer = -1
         self._last_text = -1
@@ -503,10 +586,10 @@ class ClaudeBuddy(displayio.Group):
             song = mu.get("t", "")
             if mu.get("a"):
                 song += " - " + mu["a"]
-            _set_text(self.project, "~ " + _marquee(song, 36, now))
+            _set_text(self.project, "~ " + _marquee(song, self._proj_chars - 2, now))
             self.project.color = GREEN
         else:
-            _set_text(self.project, _fit(s.get("p", "") or "Claude Code", 38))
+            _set_text(self.project, _fit(s.get("p", "") or "Claude Code", self._proj_chars))
             self.project.color = GREY
 
     # ---- page helpers ----------------------------------------------------
@@ -548,11 +631,52 @@ class ClaudeBuddy(displayio.Group):
 
     def pixel_color(self, now):
         """Color for the onboard NeoPixel."""
-        if self.mode == "permission":
+        if self.mode == "permission" or "p" in self.snap.get("sd", ""):
             return YELLOW if int(now * 4) % 2 else 0x000000
         if self.mode in BUSY_MODES:
             return MODES[self.mode][1]
         return 0x000000
+
+    def _tick_cooler(self, now):
+        n = max(2, min(len(self.snap.get("sd", "")), 4))
+        xs = MINI_SLOTS[n]
+        if n != self._cooler_n:
+            self._cooler_n = n
+            for i, (m, eyes) in enumerate(self.cooler_minis):
+                m.hidden = i >= n
+                if i < n:
+                    m.x = xs[i]
+                    eyes.x = 2 if xs[i] < 160 else -2       # look toward the cooler
+        # bubbles glug up the jug, a drop falls from the tap now and then
+        for i, c in enumerate(self.cooler_bubbles):
+            k = (now * 0.6 + i * 0.37) % 1.0
+            c.y = 62 - int(k * 26)
+            c.x = 152 + i * 7 + int(math.sin(now * 3 + i) * 2)
+        k = (now % 3.0) / 0.6
+        self.drip.hidden = k >= 1.0
+        self.drip.y = 99 + int(k * 16)
+        # minis sway and blink; the speaker bounces a little
+        slot = int(now / CHAT_EVERY)
+        speaker = (slot * 3 + slot // n) % n
+        talking = (now % CHAT_EVERY) < CHAT_EVERY * 0.75
+        for i, (m, eyes) in enumerate(self.cooler_minis[:n]):
+            m.y = MINI_Y + int(math.sin(now * 1.3 + i * 1.7) * 1.5)
+            if talking and i == speaker:
+                m.y -= int(abs(math.sin(now * 9)) * 3)
+            eyes.hidden = (now * 0.8 + i * 0.29) % 3.1 < 0.12
+        # the mini nearest the cooler on the left sips from a cup
+        sipper = xs.index(98)
+        sm = self.cooler_minis[sipper][0]
+        sip = (now % 7.0) > 5.6
+        self.cup.x = sm.x + (27 if sip else 31)
+        self.cup.y = sm.y + (5 if sip else 12)
+        # speech bubble over whoever is talking
+        self.chat.hidden = not talking
+        if talking:
+            sm = self.cooler_minis[speaker][0]
+            self.chat.x = sm.x - 13
+            self.chat.y = sm.y - 24
+            _set_text(self.chat_text, CHAT[(slot * 7) % len(CHAT)])
 
     def _tick_pencil(self, now):
         line, x, phase = self._page_state(now)
@@ -713,6 +837,8 @@ class ClaudeBuddy(displayio.Group):
                 n.hidden = k > 0.92
         elif prop == "wave":
             self.arm_r.y = 20 + int(math.sin(now * 12) * 10)
+        elif prop == "cooler":
+            self._tick_cooler(now)
 
         # light bulb pop after thinking
         if self._bulb_pending:
@@ -741,12 +867,13 @@ class ClaudeBuddy(displayio.Group):
             if self.music_view:
                 s = {}
                 parts.append("Claude is resting")
+            if "ov" in s:
+                left = max(0, int(s["ov"] - lag))
+                parts.append("manual %d:%02d" % (left // 60, left % 60))
             if "n" in s:
                 parts.append("%d tools" % s["n"])
             if "el" in s:
                 parts.append(_fmt_elapsed(s["el"] + lag))
-            if s.get("ss", 1) > 1:
-                parts.append("%d sessions" % s["ss"])
-            if mode in ("done", "waiting", "bye") and "age" in s:
+            if mode in ("done", "waiting", "bye", "cooler") and "age" in s:
                 parts.append("idle " + _fmt_elapsed(s["age"] + lag))
             _set_text(self.footer, "  |  ".join(parts) or " ")

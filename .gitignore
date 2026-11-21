@@ -1,3 +1,4 @@
 pyportal_backup_*/
 __pycache__/
 .venv/
+host/weather_config.json

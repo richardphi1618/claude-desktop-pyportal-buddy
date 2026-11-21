@@ -9,6 +9,11 @@ adds the current Spotify track to the snapshot as "mu": {"t": title, "a": artist
 That part needs:  python.exe -m pip install winrt-Windows.Media.Control
                   winrt-Windows.Foundation winrt-Windows.Foundation.Collections
 
+Also fetches the current weather from OpenWeather (the PyPortal has no Wi-Fi in
+use) and adds it as "wx", plus the local time as "tm": [y, mo, d, h, mi, s] so
+the device can set its clock. The weather needs host/weather_config.json:
+    {"token": "<openweather api key>", "location": "Richmond,US", "units": "imperial"}
+
 Launched by start_bridge.sh as:  tail -F events.jsonl | python.exe -u this.py
 """
 import asyncio
@@ -18,6 +23,9 @@ import re
 import sys
 import threading
 import time
+import urllib.parse
+import urllib.request
+from pathlib import Path
 
 import serial
 from serial.tools import list_ports
@@ -28,6 +36,23 @@ RECONNECT = 3.0
 FORGET_AFTER = 4 * 3600
 MUSIC_POLL = 1.5
 MUSIC_APPS = ("spotify",)     # substrings of the player's app id (lower case)
+WEATHER_EVERY = 600
+WEATHER_RETRY = 60
+WEATHER_CONFIG = Path(__file__).with_name("weather_config.json")
+MIN_HOLD = 5.0                # s a session keeps the screen before an equal one takes it
+DONE_HOLD = 10.0              # s a finished session is shown before it counts as seen
+IDLE_SHOWN = 180              # s the device keeps showing a done/waiting session (= IDLE_TIMEOUT in device/code.py)
+WAIT_NTYPES = ("idle_prompt", "elicitation_dialog")
+LIVE_FOR = 600                # s without events before a session drops off the dots
+MAX_DOTS = 8
+IDLE_MODES = ("done", "waiting", "bye", "hello")
+# mirror of claude_wanted() in device/code.py: how long each state stays on screen
+WORK_MODES = ("read", "web", "edit", "bash", "agent", "plan", "tool", "compact")
+THINK_SHOWN = 300
+BUSY_SHOWN = 1800
+BYE_SHOWN = 30
+OVERRIDE = 30.0               # s a tap on the screen overrides the automatic choice
+TAP_LINE = "@tap"             # what the PyPortal prints when the screen is tapped
 PLAYING = 4                   # GlobalSystemMediaTransportControlsSessionPlaybackStatus.PLAYING
 
 READ_TOOLS = {"Read", "Grep", "Glob", "LS", "NotebookRead", "ListMcpResourcesTool",
@@ -70,7 +95,8 @@ def tool_label(tool, detail):
 
 
 class Session:
-    def __init__(self, now):
+    def __init__(self, sid, now):
+        self.sid = sid
         self.start = now
         self.last = now
         self.mode = "hello"
@@ -80,16 +106,72 @@ class Session:
         self.ended = False
         self.pending = ""
         self.cmd = ""
+        self.unseen = False       # finished, but not yet shown on screen for DONE_HOLD
+        self.shown_done = None    # when its "All done" first reached the screen
+
+    def visible(self, now):
+        """Would the device show this session? (Same rules as claude_wanted().)"""
+        age = now - self.last
+        if self.mode == "thinking":
+            return age < THINK_SHOWN
+        if self.mode == "permission" or self.mode in WORK_MODES:
+            return age < BUSY_SHOWN
+        if self.mode == "bye":
+            return age < BYE_SHOWN
+        return age < IDLE_SHOWN
+
+    def idle(self, now):
+        """Not doing anything worth its own screen (counts toward the water cooler)."""
+        if not self.visible(now):
+            return True
+        return self.mode in IDLE_MODES and not (self.mode == "done" and self.unseen)
+
+    def rank(self, now):
+        """How much this session wants the screen (higher wins).
+
+        A session the device would hide (too old for its state) never outranks
+        one it would show, or the screen falls back to weather while work goes on.
+        """
+        if not self.visible(now):
+            return 0
+        if self.mode == "permission":
+            return 4
+        if self.mode == "done" and self.unseen:
+            return 3
+        if self.mode == "waiting":
+            return 2
+        if self.mode in ("done", "bye"):
+            return 0
+        return 1                  # hello, thinking, tools, compacting
+
+    def dot(self):
+        """One-letter state for the session dots on the device."""
+        if self.mode == "permission":
+            return "p"
+        if self.mode == "done":
+            return "d" if self.unseen else "i"
+        if self.mode == "waiting":
+            return "w"
+        if self.mode == "bye":
+            return "i"
+        return "b"
 
 
 class Model:
     def __init__(self):
         self.sessions = {}
         self.music = None
+        self.weather = None
+        self.focus = None         # sid currently on screen
+        self.focus_since = 0.0
+        self.override_until = 0.0  # while in the future, a tap chose the focus
 
     def apply(self, ev):
         if "_music" in ev:
             self.music = ev["_music"]
+            return
+        if "_weather" in ev:
+            self.weather = ev["_weather"]
             return
         name = ev.get("ev", "")
         if name == "SubagentStop":
@@ -97,11 +179,15 @@ class Model:
             # after Stop. Real subagents end with PostToolUse(Agent) anyway, so
             # it carries no information and used to flip "done" back to "thinking".
             return
+        if name == "Notification" and not self._needs_you(ev):
+            return                # e.g. agent_completed: nothing for the screen
         now = min(float(ev.get("ts") or time.time()), time.time())
         sid = ev.get("sid") or "?"
         s = self.sessions.get(sid)
         if s is None or name == "SessionStart":
-            s = self.sessions[sid] = Session(now)
+            s = self.sessions[sid] = Session(sid, now)
+        if name != "Stop":
+            s.unseen = False
         s.last = now
         s.ended = False
         s.project = ev.get("proj") or s.project
@@ -120,13 +206,16 @@ class Model:
             s.mode = "thinking"
         elif name == "Notification":
             msg = ev.get("msg", "")
-            if ev.get("ntype") == "permission_prompt" or "permission" in msg.lower():
+            ntype = ev.get("ntype", "")
+            if ntype == "permission_prompt" or not ntype and "permission" in msg.lower():
                 s.mode = "permission"
                 s.detail = ("OK? " + s.pending) if s.pending else msg
-            else:
+            elif ntype in WAIT_NTYPES or not ntype:
                 s.mode, s.detail = "waiting", msg or "waiting for you"
+            # other types (agent_completed, auth_success, ...) don't need you
         elif name == "Stop":
             s.mode, s.detail = "done", "%d tools used" % s.tools
+            s.unseen, s.shown_done = True, None
         elif name == "PreCompact":
             s.mode, s.detail = "compact", "tidying up context"
         elif name == "SessionEnd":
@@ -137,20 +226,108 @@ class Model:
         for sid in [k for k, v in self.sessions.items() if now - v.last > FORGET_AFTER]:
             del self.sessions[sid]
         if not self.sessions:
-            if self.music is None:
-                return None
-            snap = {"m": "bye", "age": 99999}     # no Claude, just music
+            snap = {"m": "bye", "age": 99999}     # no Claude: music/weather only
         else:
             snap = self._claude_snapshot(now)
         if self.music:
             snap["mu"] = self.music
+        if self.weather:
+            snap["wx"] = self.weather
+        snap["tm"] = list(time.localtime(now)[:6])
         return snap
 
+    @staticmethod
+    def _needs_you(ev):
+        ntype = ev.get("ntype", "")
+        if ntype:
+            return ntype == "permission_prompt" or ntype in WAIT_NTYPES
+        return True               # old hook without ntype: keep the old behavior
+
+    def _live(self, now, pick=None):
+        """Sessions shown as dots (and cycled by taps), oldest first."""
+        return sorted((s for s in self.sessions.values()
+                       if not s.ended and (now - s.last < LIVE_FOR or s.mode == "permission")
+                       or s is pick),
+                      key=lambda s: s.start)[:MAX_DOTS]
+
+    def tap(self, now):
+        """The screen was tapped: show the next session for OVERRIDE seconds."""
+        cur = self.sessions.get(self.focus)
+        live = self._live(now, cur)
+        if len(live) < 2:
+            return False
+        i = live.index(cur) if cur in live else -1
+        nxt = live[(i + 1) % len(live)]
+        self.focus, self.focus_since = nxt.sid, now
+        self.override_until = now + OVERRIDE
+        return True
+
+    def _choose(self, now):
+        """Pick the session to show: highest rank, but hold the current one a while."""
+        for s in self.sessions.values():          # stale prompts stop being urgent
+            if s.mode == "permission" and now - s.last > 1800:
+                s.mode = "waiting"
+        if self.override_until:
+            if now < self.override_until and self.focus in self.sessions:
+                return self._mark_seen(self.sessions[self.focus], now)
+            self.override_until = 0.0             # back to automatic, with a fresh hold
+            self.focus_since = now
+        best = max(self.sessions, key=lambda k: (self.sessions[k].rank(now), self.sessions[k].last))
+        cur = self.sessions.get(self.focus)
+        if cur is not None and best != self.focus:
+            held = now - self.focus_since
+            if cur.rank(now) > self.sessions[best].rank(now):
+                best = self.focus                 # still the most important one
+            elif cur.rank(now) == self.sessions[best].rank(now) and held < MIN_HOLD:
+                best = self.focus                 # equal: let it finish its turn
+        if best != self.focus:
+            self.focus, self.focus_since = best, now
+        return self._mark_seen(self.sessions[best], now)
+
+    @staticmethod
+    def _mark_seen(pick, now):
+        if pick.unseen and pick.mode == "done":
+            if pick.shown_done is None:
+                pick.shown_done = now
+            elif now - pick.shown_done >= DONE_HOLD:
+                pick.unseen = False
+        return pick
+
+    @staticmethod
+    def _cooler_snapshot(now, live):
+        """Every live session is idle: the minis gather at the water cooler."""
+        counts = {}
+        for s in live:
+            name = s.project or "Claude Code"
+            counts[name] = counts.get(name, 0) + 1
+        names = ", ".join(n if c == 1 else "%s x%d" % (n, c) for n, c in counts.items())
+        return {
+            "m": "cooler",
+            "d": ascii_only(names),
+            "p": "%d sessions idle" % len(live),
+            "age": int(min(now - s.last for s in live)),   # weather after the last one rests
+            "ss": len(live),
+            "sd": "".join(s.dot() for s in live),
+            "sf": -1,
+        }
+
+    def next_change(self):
+        """Time at which a hold runs out and the screen may need to switch."""
+        if self.override_until:
+            return self.override_until
+        cur = self.sessions.get(self.focus)
+        if cur is None or len(self.sessions) < 2 and not cur.unseen:
+            return None
+        if cur.unseen and cur.shown_done is not None:
+            return cur.shown_done + DONE_HOLD
+        return self.focus_since + MIN_HOLD
+
     def _claude_snapshot(self, now):
-        live = [s for s in self.sessions.values() if not s.ended and now - s.last < 600]
-        urgent = [s for s in self.sessions.values()
-                  if s.mode == "permission" and now - s.last < 1800]
-        pick = max(urgent or self.sessions.values(), key=lambda s: s.last)
+        pick = self._choose(now)
+        live = self._live(now, pick)
+        if (not self.override_until and len(live) >= 2
+                and all(s.idle(now) for s in live)):
+            return self._cooler_snapshot(now, live)
         snap = {
             "m": pick.mode,
             "d": ascii_only(pick.detail),
@@ -162,6 +339,11 @@ class Model:
         }
         if pick.mode == "bash" and pick.cmd:
             snap["c"] = ascii_only(pick.cmd)[:60]
+        if len(live) > 1:
+            snap["sd"] = "".join(s.dot() for s in live)
+            snap["sf"] = live.index(pick) if pick in live else -1
+        if self.override_until > now:
+            snap["ov"] = int(self.override_until - now + 0.999)
         return snap
 
 
@@ -214,6 +396,54 @@ def music_watcher(q):
         log("music: watcher stopped:", e)
 
 
+def load_weather_config():
+    try:
+        cfg = json.loads(WEATHER_CONFIG.read_text())
+    except FileNotFoundError:
+        return None
+    if not cfg.get("token"):
+        return None
+    cfg.setdefault("location", "Richmond,US")
+    cfg.setdefault("units", "imperial")
+    return cfg
+
+
+def fetch_weather(cfg):
+    query = urllib.parse.urlencode({"q": cfg["location"], "units": cfg["units"],
+                                    "appid": cfg["token"]})
+    url = "https://api.openweathermap.org/data/2.5/weather?" + query
+    with urllib.request.urlopen(url, timeout=15) as resp:
+        w = json.load(resp)
+    cond = w["weather"][0]
+    desc = cond.get("description", "")
+    return {
+        "i": cond.get("icon", ""),
+        "c": ascii_only("%s, %s" % (w.get("name", ""), w.get("sys", {}).get("country", "")))[:30],
+        "w": ascii_only(cond.get("main", ""))[:20],
+        "d": ascii_only(desc[:1].upper() + desc[1:])[:40],
+        "t": round(w["main"]["temp"]),
+        "u": {"imperial": "F", "metric": "C"}.get(cfg["units"], "K"),
+    }
+
+
+def weather_watcher(q):
+    cfg = load_weather_config()
+    if cfg is None:
+        log("weather: no token in", WEATHER_CONFIG, "- weather display disabled")
+        return
+    log("weather: watching", cfg["location"])
+    while True:
+        try:
+            wx = fetch_weather(cfg)
+            log("weather:", wx)
+            q.put({"_weather": wx})
+            delay = WEATHER_EVERY
+        except Exception as e:  # pylint: disable=broad-except
+            log("weather: fetch failed:", type(e).__name__, e)   # never log the URL (has the key)
+            delay = WEATHER_RETRY
+        time.sleep(delay)
+
+
 def stdin_reader(q):
     for line in sys.stdin:
         line = line.strip()
@@ -231,6 +461,7 @@ def main():
     q = queue.Queue()
     threading.Thread(target=stdin_reader, args=(q,), daemon=True).start()
     threading.Thread(target=music_watcher, args=(q,), daemon=True).start()
+    threading.Thread(target=weather_watcher, args=(q,), daemon=True).start()
     model = Model()
     ser = None
     next_try = 0.0
@@ -267,6 +498,9 @@ def main():
         if ser is None:
             continue
         try:
+            due = model.next_change()
+            if due is not None and last_sent < due <= now:
+                dirty = True
             if dirty or now - last_sent >= HEARTBEAT:
                 snap = model.snapshot()
                 if snap is not None:
@@ -282,7 +516,11 @@ def main():
                 *lines, rx = rx.split(b"\n")
                 for ln in lines:
                     text = ANSI.sub("", ln.decode("utf-8", "replace")).strip()
-                    if text:
+                    if text.endswith(TAP_LINE):
+                        switched = model.tap(time.time())
+                        log("tap:", "switched" if switched else "ignored (one session)")
+                        dirty = dirty or switched
+                    elif text:
                         log("pyportal:", text)
                 rx = rx[-2000:]
         except (serial.SerialException, OSError) as e:

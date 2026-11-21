@@ -24,7 +24,7 @@ from weather_view import WeatherView  # pylint: disable=wrong-import-position
 from claude_buddy import ClaudeBuddy, BUSY_MODES  # pylint: disable=wrong-import-position
 
 # ---- settings ---------------------------------------------------------
-IDLE_TIMEOUT = 60         # s after Claude finishes before showing weather
+IDLE_TIMEOUT = 180        # s after Claude finishes before showing weather (keep IDLE_SHOWN in the bridge equal)
 BUSY_TIMEOUT = 1800       # s a busy/permission state may stay up without news
 THINK_TIMEOUT = 300       # s "thinking" may stay up without news (e.g. after Esc)
 BRIDGE_TIMEOUT = 20       # s of serial silence => bridge gone => weather

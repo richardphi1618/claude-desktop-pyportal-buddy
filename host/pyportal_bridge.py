@@ -41,7 +41,7 @@ WEATHER_RETRY = 60
 WEATHER_CONFIG = Path(__file__).with_name("weather_config.json")
 MIN_HOLD = 5.0                # s a session keeps the screen before an equal one takes it
 DONE_HOLD = 10.0              # s a finished session is shown before it counts as seen
-IDLE_SHOWN = 60               # s the device keeps showing a done/waiting session (IDLE_TIMEOUT)
+IDLE_SHOWN = 180              # s the device keeps showing a done/waiting session (= IDLE_TIMEOUT in device/code.py)
 WAIT_NTYPES = ("idle_prompt", "elicitation_dialog")
 LIVE_FOR = 600                # s without events before a session drops off the dots
 MAX_DOTS = 8

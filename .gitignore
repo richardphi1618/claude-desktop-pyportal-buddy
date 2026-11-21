@@ -1,0 +1,3 @@
+pyportal_backup_*/
+__pycache__/
+.venv/

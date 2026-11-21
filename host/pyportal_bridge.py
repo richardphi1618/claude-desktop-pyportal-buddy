@@ -45,7 +45,12 @@ IDLE_SHOWN = 180              # s the device keeps showing a done/waiting sessio
 WAIT_NTYPES = ("idle_prompt", "elicitation_dialog")
 LIVE_FOR = 600                # s without events before a session drops off the dots
 MAX_DOTS = 8
-IDLE_MODES = ("done", "waiting", "bye")
+IDLE_MODES = ("done", "waiting", "bye", "hello")
+# mirror of claude_wanted() in device/code.py: how long each state stays on screen
+WORK_MODES = ("read", "web", "edit", "bash", "agent", "plan", "tool", "compact")
+THINK_SHOWN = 300
+BUSY_SHOWN = 1800
+BYE_SHOWN = 30
 OVERRIDE = 30.0               # s a tap on the screen overrides the automatic choice
 TAP_LINE = "@tap"             # what the PyPortal prints when the screen is tapped
 PLAYING = 4                   # GlobalSystemMediaTransportControlsSessionPlaybackStatus.PLAYING
@@ -104,20 +109,38 @@ class Session:
         self.unseen = False       # finished, but not yet shown on screen for DONE_HOLD
         self.shown_done = None    # when its "All done" first reached the screen
 
+    def visible(self, now):
+        """Would the device show this session? (Same rules as claude_wanted().)"""
+        age = now - self.last
+        if self.mode == "thinking":
+            return age < THINK_SHOWN
+        if self.mode == "permission" or self.mode in WORK_MODES:
+            return age < BUSY_SHOWN
+        if self.mode == "bye":
+            return age < BYE_SHOWN
+        return age < IDLE_SHOWN
+
+    def idle(self, now):
+        """Not doing anything worth its own screen (counts toward the water cooler)."""
+        if not self.visible(now):
+            return True
+        return self.mode in IDLE_MODES and not (self.mode == "done" and self.unseen)
+
     def rank(self, now):
         """How much this session wants the screen (higher wins).
 
-        Done/waiting only count while the device would still show them; after
-        that the device falls back to weather, so they must not outrank work.
+        A session the device would hide (too old for its state) never outranks
+        one it would show, or the screen falls back to weather while work goes on.
         """
+        if not self.visible(now):
+            return 0
         if self.mode == "permission":
             return 4
-        fresh = now - self.last < IDLE_SHOWN
-        if self.mode == "done" and self.unseen and fresh:
+        if self.mode == "done" and self.unseen:
             return 3
-        if self.mode == "waiting" and fresh:
+        if self.mode == "waiting":
             return 2
-        if self.mode in ("done", "bye", "waiting"):
+        if self.mode in ("done", "bye"):
             return 0
         return 1                  # hello, thinking, tools, compacting
 
@@ -156,6 +179,8 @@ class Model:
             # after Stop. Real subagents end with PostToolUse(Agent) anyway, so
             # it carries no information and used to flip "done" back to "thinking".
             return
+        if name == "Notification" and not self._needs_you(ev):
+            return                # e.g. agent_completed: nothing for the screen
         now = min(float(ev.get("ts") or time.time()), time.time())
         sid = ev.get("sid") or "?"
         s = self.sessions.get(sid)
@@ -210,6 +235,13 @@ class Model:
             snap["wx"] = self.weather
         snap["tm"] = list(time.localtime(now)[:6])
         return snap
+
+    @staticmethod
+    def _needs_you(ev):
+        ntype = ev.get("ntype", "")
+        if ntype:
+            return ntype == "permission_prompt" or ntype in WAIT_NTYPES
+        return True               # old hook without ntype: keep the old behavior
 
     def _live(self, now, pick=None):
         """Sessions shown as dots (and cycled by taps), oldest first."""
@@ -294,7 +326,7 @@ class Model:
         pick = self._choose(now)
         live = self._live(now, pick)
         if (not self.override_until and len(live) >= 2
-                and all(s.mode in IDLE_MODES and not s.unseen for s in live)):
+                and all(s.idle(now) for s in live)):
             return self._cooler_snapshot(now, live)
         snap = {
             "m": pick.mode,
